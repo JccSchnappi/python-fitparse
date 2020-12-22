@@ -19,7 +19,7 @@ from fitparse.records import (
 from fitparse.utils import fileish_open, is_iterable, FitParseError, FitEOFError, FitCRCError, FitHeaderError
 
 
-class FitFile(object):
+class BaseFitFile(object):
     def __init__(self, fileish, check_crc=True, data_processor=None):
         self._file = fileish_open(fileish, 'rb')
 
@@ -31,7 +31,6 @@ class FitFile(object):
         self._file.seek(0, os.SEEK_END)
         self._filesize = self._file.tell()
         self._file.seek(0, os.SEEK_SET)
-        self._messages = []
 
         # Start off by parsing the file header (sets initial attribute values)
         self._parse_file_header()
@@ -158,7 +157,6 @@ class FitFile(object):
                 elif message.mesg_type.name == 'field_description':
                     add_dev_field_description(message)
 
-        self._messages.append(message)
         return message
 
     def _parse_message_header(self):
@@ -194,8 +192,10 @@ class FitFile(object):
             base_type = BASE_TYPES.get(base_type_num, BASE_TYPE_BYTE)
 
             if (field_size % base_type.size) != 0:
-                warnings.warn("Message %d: Invalid field size %d for field '%s' of type '%s' (expected a multiple of %d); falling back to byte encoding." % (
-                    len(self._messages)+1, field_size, field.name, base_type.name, base_type.size))
+                warnings.warn(
+                    "Invalid field size %d for field '%s' of type '%s' (expected a multiple of %d); falling back to byte encoding." % (
+                    field_size, field.name, base_type.name, base_type.size)
+                )
                 base_type = BASE_TYPE_BYTE
 
             # If the field has components that are accumulators
@@ -408,6 +408,18 @@ class FitFile(object):
 
         return data_message
 
+    @staticmethod
+    def _should_yield(message, with_definitions, names):
+        if not message:
+            return False
+        if with_definitions or message.type == 'data':
+            # name arg is None we return all
+            if names is None:
+                return True
+            elif (message.name in names) or (message.mesg_num in names):
+                return True
+        return False
+
     ##########
     # Public API
 
@@ -415,44 +427,58 @@ class FitFile(object):
         if with_definitions:  # with_definitions implies as_dict=False
             as_dict = False
 
+        names = None
         if name is not None:
             if is_iterable(name):
                 names = set(name)
             else:
                 names = set((name,))
 
-        def should_yield(message):
-            if with_definitions or message.type == 'data':
-                # name arg is None we return all
-                if name is None:
-                    return True
-                else:
-                    if (message.name in names) or (message.mesg_num in names):
-                        return True
-            return False
+        while not self._complete:
+            message = self._parse_message()
+            if self._should_yield(message, with_definitions, names):
+                yield message.as_dict() if as_dict else message
+
+    def __iter__(self):
+        return self.get_messages()
+
+
+class FitFile(BaseFitFile):
+
+    def __init__(self, *args, **kwargs):
+        super(FitFile, self).__init__(*args, **kwargs)
+        self._messages = []
+
+    def _parse_message(self):
+        self._messages.append(super(FitFile, self)._parse_message())
+        return self._messages[-1]
+
+    def get_messages(self, name=None, with_definitions=False, as_dict=False):
+        if with_definitions:  # with_definitions implies as_dict=False
+            as_dict = False
+
+        names = None
+        if name is not None:
+            if is_iterable(name):
+                names = set(name)
+            else:
+                names = set((name,))
 
         # Yield all parsed messages first
         for message in self._messages:
-            if should_yield(message):
+            if self._should_yield(message, with_definitions, names):
                 yield message.as_dict() if as_dict else message
 
-        # If there are unparsed messages, yield those too
-        while not self._complete:
-            message = self._parse_message()
-            if message and should_yield(message):
-                yield message.as_dict() if as_dict else message
+        for message in super(FitFile, self).get_messages(names, with_definitions, as_dict):
+            yield message
 
     @property
     def messages(self):
-        # TODO: could this be more efficient?
         return list(self.get_messages())
 
     def parse(self):
         while self._parse_message():
             pass
-
-    def __iter__(self):
-        return self.get_messages()
 
 
 # TODO: Create subclasses like Activity and do per-value monkey patching
